@@ -73,7 +73,7 @@ Typical per-shard latency is **10-15ms** for local queries, with embedding gener
 
 Turbo Query uses a weighted hybrid scoring formula:
 
-```
+```text
 final_score = 0.7 × normalized_BM25 + 0.3 × normalized_cosine
 ```
 
@@ -83,7 +83,7 @@ This balances:
 
 ## Architecture Overview
 
-```
+```text
 User Query
     ↓
 Coordinator (fan-out)
