@@ -1,0 +1,445 @@
+---
+title: Installation
+description: Complete installation and setup guide for Turbo Query
+---
+
+# Installation
+
+This guide covers all installation methods for Turbo Query, from the recommended Docker Compose setup to manual installation from source.
+
+## Prerequisites
+
+### System Requirements
+
+- **OS**: Linux, macOS, or Windows with WSL2
+- **RAM**: Minimum 4GB (8GB+ recommended for production)
+- **Storage**: 10GB+ available space (varies with dataset size)
+- **CPU**: Multi-core processor recommended for parallel shard operations
+
+### Required Software
+
+<Tabs>
+  <Tab title="Docker Compose (Recommended)">
+    - **Docker**: Version 20.10+
+    - **Docker Compose**: Version 2.0+
+
+    Verify installation:
+    ```bash
+    docker --version
+    docker-compose --version
+    ```
+  </Tab>
+
+  <Tab title="Manual Installation">
+    - **Go**: Version 1.25+ (source/go.mod:3)
+    - **Docker**: For running Ollama
+    - **Git**: For cloning the repository
+
+    Verify installation:
+    ```bash
+    go version  # Should show go1.25 or higher
+    docker --version
+    git --version
+    ```
+  </Tab>
+</Tabs>
+
+### External Dependencies
+
+<Note>
+**Ollama** is required for generating MiniLM embeddings. The Docker Compose setup includes Ollama automatically.
+</Note>
+
+## Installation Methods
+
+### Method 1: Docker Compose (Recommended)
+
+The fastest way to get Turbo Query running with all dependencies.
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/your-org/turbo-query.git
+    cd turbo-query
+    ```
+  </Step>
+
+  <Step title="Review the Docker Compose configuration">
+    The `docker-compose.yml` file defines:
+
+    - **4 shard servers** (shard0-shard3) on ports 9001-9004
+    - **Ollama service** on port 11434
+    - **Network**: `turbo-net` for inter-service communication
+    - **Volumes**: Persistent storage for indexes and embeddings
+
+    <Tip>
+    You can adjust the number of shards by adding/removing service definitions in `docker-compose.yml`.
+    </Tip>
+  </Step>
+
+  <Step title="Build and start all services">
+    ```bash
+    docker-compose up -d --build
+    ```
+
+    This will:
+    - Build the Go application using the multi-stage Dockerfile (source/Dockerfile:1-25)
+    - Start 4 shard containers
+    - Start the Ollama container
+    - Create persistent volumes for data storage
+  </Step>
+
+  <Step title="Verify services are running">
+    ```bash
+    docker-compose ps
+    ```
+
+    All services should show status `Up`. Test connectivity:
+
+    ```bash
+    # Test shard health
+    curl http://localhost:9001/health
+    curl http://localhost:9002/health
+
+    # Test Ollama
+    curl http://localhost:11434/api/tags
+    ```
+  </Step>
+
+  <Step title="Download the MiniLM model">
+    Pull the all-MiniLM embedding model into Ollama:
+
+    ```bash
+    docker exec ollama ollama pull all-minilm
+    ```
+
+    <Info>
+    This is a one-time setup. The model is cached in the `ollama-data` volume.
+    </Info>
+  </Step>
+</Steps>
+
+### Method 2: Manual Installation
+
+For development or custom deployments.
+
+<Steps>
+  <Step title="Clone and navigate to the repository">
+    ```bash
+    git clone https://github.com/your-org/turbo-query.git
+    cd turbo-query
+    ```
+  </Step>
+
+  <Step title="Install Go dependencies">
+    ```bash
+    go mod download
+    ```
+
+    This installs all required packages (source/go.mod:5-11):
+    - `bleve/v2` - Full-text search engine
+    - `mmap-go` - Memory-mapped file I/O
+    - `chi/v5` - HTTP router
+    - `cors` - CORS middleware
+    - `godotenv` - Environment variable loading
+  </Step>
+
+  <Step title="Set up Ollama">
+    Install and run Ollama for embeddings:
+
+    ```bash
+    # Install Ollama (Linux)
+    curl -fsSL https://ollama.ai/install.sh | sh
+
+    # Or use Docker
+    docker run -d -p 11434:11434 --name ollama ollama/ollama:latest
+
+    # Pull the MiniLM model
+    ollama pull all-minilm
+    ```
+  </Step>
+
+  <Step title="Build the shard server">
+    ```bash
+    go build -o shard-server ./cmd/shard
+    ```
+
+    This compiles the shard server binary (source/cmd/shard/main.go:1-17).
+  </Step>
+
+  <Step title="Prepare data directories">
+    Create directories for each shard's data:
+
+    ```bash
+    mkdir -p internal/data/shard-0
+    mkdir -p internal/data/shard-1
+    mkdir -p internal/data/shard-2
+    mkdir -p internal/data/shard-3
+    ```
+
+    Each shard directory needs:
+    - `index.bleve/` - Bleve inverted index (source/internal/shardnode/server.go:46)
+    - `vectors.bin` - Memory-mapped vector storage (source/internal/shardnode/server.go:47)
+    - `docmap.json` - Document ID mapping (source/internal/shardnode/server.go:48)
+  </Step>
+
+  <Step title="Run shard servers">
+    Start each shard in a separate terminal:
+
+    ```bash
+    # Terminal 1 - Shard 0
+    PORT=9001 SHARD_ID=0 ./shard-server
+
+    # Terminal 2 - Shard 1
+    PORT=9002 SHARD_ID=1 ./shard-server
+
+    # Terminal 3 - Shard 2
+    PORT=9003 SHARD_ID=2 ./shard-server
+
+    # Terminal 4 - Shard 3
+    PORT=9004 SHARD_ID=3 ./shard-server
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+Manual installation requires you to manage the indexing pipeline separately. See the [Indexing Pipeline](/development/indexing-pipeline) for details.
+</Warning>
+
+## Configuration
+
+### Environment Variables
+
+Each shard server accepts the following environment variables:
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `PORT` | No | `8080` | HTTP server port (source/internal/shardnode/server.go:32-35) |
+| `SHARD_ID` | No | `0` | Unique shard identifier (source/internal/shardnode/server.go:39-42) |
+
+<CodeGroup>
+```bash Docker Compose
+# In docker-compose.yml
+environment:
+  - PORT=8080
+  - SHARD_ID=0
+```
+
+```bash Manual
+# Set before running
+export PORT=9001
+export SHARD_ID=0
+./shard-server
+```
+
+```bash .env file
+# Create .env in project root
+PORT=8080
+SHARD_ID=0
+```
+</CodeGroup>
+
+### Docker Compose Configuration
+
+The `docker-compose.yml` file uses these key configurations:
+
+```yaml
+services:
+  shard0:
+    build: .                    # Uses multi-stage Dockerfile
+    container_name: shard0
+    environment:
+      - PORT=8080               # Internal port
+      - SHARD_ID=0              # Shard identifier
+    volumes:
+      - ./internal/data/shard-0:/data  # Persistent storage
+    ports:
+      - "9001:8080"             # External:Internal mapping
+    networks:
+      - turbo-net               # Shared network
+```
+
+<Tip>
+The internal port is always `8080`, but external ports (9001-9004) can be changed to avoid conflicts.
+</Tip>
+
+### Data Directories
+
+Each shard requires three files in its data directory (source/internal/shardnode/server.go:46-48):
+
+```
+/data/
+├── index.bleve/           # Bleve full-text index
+│   ├── store/
+│   └── index_meta.json
+├── vectors.bin            # Memory-mapped vectors (384 dims × 4 bytes)
+└── docmap.json            # Document ID mapping
+```
+
+<Note>
+These files are generated by the indexing pipeline. See the [Indexing Pipeline](/development/indexing-pipeline) for details on creating them.
+</Note>
+
+## Dockerfile Breakdown
+
+The multi-stage Dockerfile optimizes build size and security:
+
+### Build Stage (source/Dockerfile:1-12)
+```dockerfile
+FROM golang:1.25-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -o shard-server ./cmd/shard
+```
+
+- Uses Go 1.25 Alpine for minimal image size
+- Builds statically linked binary (CGO_ENABLED=0)
+- Compiles for Linux x86_64
+
+### Runtime Stage (source/Dockerfile:14-25)
+```dockerfile
+FROM alpine:3.20
+WORKDIR /app
+COPY --from=builder /app/shard-server .
+RUN mkdir -p /data
+EXPOSE 8080
+CMD ["./shard-server"]
+```
+
+- Ultra-minimal Alpine base (~5MB)
+- Only includes the compiled binary
+- Exposes port 8080 for HTTP traffic
+
+<Info>
+The final image is approximately **15-20MB**, making it ideal for containerized deployments.
+</Info>
+
+## Verification
+
+### Health Check
+
+Verify each shard is responding:
+
+```bash
+for port in 9001 9002 9003 9004; do
+  echo "Testing shard on port $port..."
+  curl -s http://localhost:$port/health && echo " ✓"
+done
+```
+
+### Test Search
+
+Execute a test query:
+
+```bash
+curl -X POST http://localhost:9001/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "test", "top_k": 5}'
+```
+
+Expected response structure (source/internal/shardnode/types.go:15-17):
+```json
+{
+  "hits": [
+    {
+      "doc_id": "...",
+      "score": 0.85,
+      "shard_id": "0",
+      "title": "...",
+      "text": "..."
+    }
+  ]
+}
+```
+
+### Monitor Logs
+
+<CodeGroup>
+```bash Docker Compose
+# All services
+docker-compose logs -f
+
+# Specific shard
+docker-compose logs -f shard0
+
+# Latency metrics
+docker-compose logs shard0 | grep latency
+```
+
+```bash Manual
+# Logs appear in the terminal where you started the shard
+# Look for:
+starting shard: 0
+starting shard server on :9001
+received search: test
+shard=0 latency=12.4ms
+```
+</CodeGroup>
+
+## Troubleshooting
+
+### Port Already in Use
+
+If ports 9001-9004 are already in use:
+
+```yaml
+# Edit docker-compose.yml
+ports:
+  - "9101:8080"  # Change 9001 to 9101
+```
+
+### Ollama Connection Failed
+
+Ensure Ollama is running and accessible:
+
+```bash
+# Test Ollama
+curl http://localhost:11434/api/tags
+
+# Restart Ollama container
+docker-compose restart ollama
+```
+
+### Index Not Found
+
+If you see "failed to open index" errors:
+
+```bash
+# Ensure data directories exist
+ls -la internal/data/shard-0/
+
+# You need to run the indexing pipeline first
+# See the Indexing Guide for details
+```
+
+### Memory Issues
+
+For systems with limited RAM:
+
+```yaml
+# Add memory limits in docker-compose.yml
+services:
+  shard0:
+    mem_limit: 512m
+    memswap_limit: 512m
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart Guide" icon="rocket" href="/quickstart">
+    Run your first search query in minutes
+  </Card>
+  <Card title="Indexing Data" icon="database" href="/development/indexing-pipeline">
+    Learn how to index your own documents
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture/overview">
+    Understand the distributed architecture
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/search">
+    Explore all available endpoints
+  </Card>
+</CardGroup>

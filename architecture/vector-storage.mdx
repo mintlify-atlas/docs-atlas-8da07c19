@@ -1,0 +1,245 @@
+---
+title: Memory-Mapped Vector Storage
+description: Zero-copy vector storage using memory-mapped files
+---
+
+## Overview
+
+Turbo Query stores dense embeddings in memory-mapped binary files (`vectors.bin`) for zero-copy, high-performance vector access. Each shard maintains its own vector store aligned with local document IDs.
+
+## Storage Format
+
+Vectors are stored as contiguous 32-bit floats in a binary file:
+
+```
+[doc0_dim0][doc0_dim1]...[doc0_dim383]
+[doc1_dim0][doc1_dim1]...[doc1_dim383]
+...
+```
+
+### Constants
+
+```go internal/shardnode/routes.go
+const (
+	vectorDim = 384  // MiniLM embedding dimension
+)
+```
+
+Each vector occupies `384 dimensions × 4 bytes = 1,536 bytes`.
+
+<Info>
+  The 384-dimension vectors come from the `all-minilm` model served by Ollama.
+</Info>
+
+## Memory Mapping
+
+Shards open `vectors.bin` and map it into memory on startup:
+
+```go internal/shardnode/server.go
+func NewServer() *http.Server {
+	vectorPath := "/data/vectors.bin"
+	
+	vecFile, err := os.Open(vectorPath)
+	if err != nil {
+		log.Fatalf("failed to open vectors: %v", err)
+	}
+
+	mmapBuf, err := mmap.Map(vecFile, mmap.RDONLY, 0)
+	if err != nil {
+		log.Fatalf("mmap failed: %v", err)
+	}
+
+	s := &Server{
+		// ...
+		mmapBuf: mmapBuf,
+	}
+	// ...
+}
+```
+
+The `mmap.RDONLY` flag maps the file in read-only mode, enabling safe concurrent access.
+
+<Note>
+  Memory-mapped files avoid copying data from kernel to user space, reducing latency.
+</Note>
+
+## Reading Vectors
+
+Vectors are retrieved by computing the byte offset from the document ID:
+
+```go internal/shardnode/routes.go
+func (s *Server) getVector(docID uint32) []float32 {
+	start := int(docID) * vectorDim * 4
+	end := start + vectorDim*4
+
+	if start < 0 || end > len(s.mmapBuf) {
+		log.Printf(
+			"vector OOB: docID=%d start=%d end=%d mmap=%d",
+			docID, start, end, len(s.mmapBuf),
+		)
+		return nil
+	}
+
+	raw := s.mmapBuf[start:end]
+
+	vec := make([]float32, vectorDim)
+	for i := 0; i < vectorDim; i++ {
+		bits := binary.LittleEndian.Uint32(raw[i*4:])
+		vec[i] = math.Float32frombits(bits)
+	}
+	return vec
+}
+```
+
+### Vector Retrieval Steps
+
+1. **Calculate offset**: `docID × 384 × 4 bytes`
+2. **Bounds check**: Ensure offset is within mmap buffer
+3. **Slice buffer**: Extract raw bytes for this vector
+4. **Decode floats**: Convert little-endian bytes to `float32`
+
+<Warning>
+  Out-of-bounds access returns `nil` and logs an error instead of panicking.
+</Warning>
+
+## Writing Vectors During Indexing
+
+During the indexing pipeline, normalized vectors are written directly to mmap:
+
+```go internal/shard/shard.go
+func writeVector(s *Shard, id uint32, vec []float32) {
+	dim := embed.Dim
+
+	offset := int64(id) * int64(dim*4)
+	size := int64(dim * 4)
+	end := offset + size
+	if end > int64(len(s.Mmap)) {
+		panic("mmap overflow")
+	}
+	copy(s.Mmap[offset:end], float32SliceToBytes(vec))
+}
+
+func float32SliceToBytes(f []float32) []byte {
+	if len(f) == 0 {
+		return nil
+	}
+	return unsafe.Slice(
+		(*byte)(unsafe.Pointer(unsafe.SliceData(f))),
+		len(f)*4,
+	)
+}
+```
+
+The `unsafe` package enables zero-copy conversion from `[]float32` to `[]byte`.
+
+## L2 Normalization
+
+All vectors are L2-normalized before storage, converting cosine similarity to dot product:
+
+```go internal/embed/embed.go
+func normalize(vec []float32) {
+	var sum float64
+	for _, v := range vec {
+		sum += float64(v * v)
+	}
+
+	norm := float32(math.Sqrt(sum))
+	if norm == 0 {
+		return
+	}
+
+	inv := 1.0 / norm
+	for i := range vec {
+		vec[i] *= inv
+	}
+}
+
+func Embed(text string) []float32 {
+	// ... call Ollama API ...
+	vec := make([]float32, len(result.Embedding))
+	for i, v := range result.Embedding {
+		vec[i] = float32(v)
+	}
+	normalize(vec)
+	return vec
+}
+```
+
+### Why Normalize?
+
+<Steps>
+  <Step title="Cosine Similarity">
+    Cosine similarity = dot(A, B) / (||A|| × ||B||)
+  </Step>
+  
+  <Step title="After Normalization">
+    If ||A|| = ||B|| = 1, then cosine = dot(A, B)
+  </Step>
+  
+  <Step title="Performance Gain">
+    Eliminates expensive square root and division during search
+  </Step>
+</Steps>
+
+<Tip>
+  Pre-normalizing vectors reduces query-time cosine similarity to a simple dot product.
+</Tip>
+
+## Dot Product Implementation
+
+With normalized vectors, cosine similarity is computed as:
+
+```go internal/shardnode/routes.go
+func dot(a, b []float32) float64 {
+	var sum float64
+	for i := 0; i < len(a); i++ {
+		sum += float64(a[i] * b[i])
+	}
+	return sum
+}
+```
+
+This simple loop computes the dot product in O(d) where d = 384.
+
+## Storage Efficiency
+
+For a shard with 70,000 documents:
+
+- **Per-document size**: 384 dimensions × 4 bytes = 1,536 bytes
+- **Total shard size**: 70,000 × 1,536 bytes ≈ 105 MB
+- **4 shards total**: ~420 MB for 280,000 documents
+
+<Info>
+  The compact binary format minimizes storage overhead compared to JSON or text-based formats.
+</Info>
+
+## Benefits
+
+<CardGroup cols={2}>
+  <Card title="Zero-Copy Access" icon="bolt">
+    Vectors are read directly from memory without kernel/user space copies
+  </Card>
+  
+  <Card title="Fast Startup" icon="rocket">
+    No deserialization needed—vectors are ready immediately after mmap
+  </Card>
+  
+  <Card title="Memory Efficiency" icon="memory">
+    OS pages in vectors on-demand, avoiding full file load
+  </Card>
+  
+  <Card title="Concurrent Safe" icon="shield">
+    Read-only mmap enables safe multi-threaded access
+  </Card>
+</CardGroup>
+
+## Related Topics
+
+<CardGroup cols={2}>
+  <Card title="Hybrid Scoring" icon="chart-mixed" href="/architecture/hybrid-scoring">
+    How vectors are used in similarity scoring
+  </Card>
+  <Card title="Sharding" icon="arrows-split-up-and-left" href="/architecture/sharding">
+    How documents are distributed across shards
+  </Card>
+</CardGroup>

@@ -1,0 +1,260 @@
+---
+title: Deployment
+description: Deploy Turbo Query using Docker Compose with sharded architecture
+---
+
+## Overview
+
+Turbo Query uses a distributed architecture with multiple shard servers and an Ollama embedding service, all orchestrated through Docker Compose. Each shard maintains its own Bleve index and memory-mapped vector store.
+
+## Docker Compose Deployment
+
+The system deploys 4 shard servers plus Ollama for embedding generation:
+
+```yaml docker-compose.yml
+services:
+  shard0:
+    build: .
+    container_name: shard0
+    environment:
+      - PORT=8080
+      - SHARD_ID=0
+    volumes:
+      - ./internal/data/shard-0:/data
+    ports:
+      - "9001:8080"
+    networks:
+      - turbo-net
+
+  shard1:
+    build: .
+    container_name: shard1
+    environment:
+      - PORT=8080
+      - SHARD_ID=1
+    volumes:
+      - ./internal/data/shard-1:/data
+    ports:
+      - "9002:8080"
+    networks:
+      - turbo-net
+
+  shard2:
+    build: .
+    container_name: shard2
+    environment:
+      - PORT=8080
+      - SHARD_ID=2
+    volumes:
+      - ./internal/data/shard-2:/data
+    ports:
+      - "9003:8080"
+    networks:
+      - turbo-net
+
+  shard3:
+    build: .
+    container_name: shard3
+    environment:
+      - PORT=8080
+      - SHARD_ID=3
+    volumes:
+      - ./internal/data/shard-3:/data
+    ports:
+      - "9004:8080"
+    networks:
+      - turbo-net
+
+  ollama:
+    image: ollama/ollama:latest  
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - turbo-net
+
+networks:
+  turbo-net:
+
+volumes:
+  ollama-data:
+```
+
+## Port Mappings
+
+Each shard server runs on port 8080 internally and is mapped to a unique external port:
+
+| Service | Internal Port | External Port |
+|---------|--------------|---------------|
+| shard0  | 8080         | 9001          |
+| shard1  | 8080         | 9002          |
+| shard2  | 8080         | 9003          |
+| shard3  | 8080         | 9004          |
+| ollama  | 11434        | 11434         |
+
+## Environment Variables
+
+Each shard server requires two environment variables:
+
+<ParamField path="PORT" type="string" default="8080">
+  The internal HTTP server port for the shard
+</ParamField>
+
+<ParamField path="SHARD_ID" type="string" required>
+  Unique identifier for the shard (0-3)
+</ParamField>
+
+Example from internal/shardnode/server.go:32-42:
+
+```go
+portStr := os.Getenv("PORT")
+if portStr == "" {
+    portStr = "8080"
+}
+
+port, _ := strconv.Atoi(portStr)
+
+shardID := os.Getenv("SHARD_ID")
+if shardID == "" {
+    shardID = "0"
+}
+```
+
+## Volume Mounts
+
+Each shard requires persistent storage for three files:
+
+- `index.bleve/` - Bleve inverted index directory
+- `vectors.bin` - Memory-mapped dense vector store
+- `docmap.json` - Global-to-local document ID mapping
+
+Volumes are mounted to `/data` inside each container:
+
+```yaml
+volumes:
+  - ./internal/data/shard-0:/data
+```
+
+The shard server reads these files on startup (internal/shardnode/server.go:46-73):
+
+```go
+indexPath := "/data/index.bleve"
+vectorPath := "/data/vectors.bin"
+docmapPath := "/data/docmap.json"
+
+idx, err := bleve.Open(indexPath)
+if err != nil {
+    log.Fatalf("failed to open index: %v", err)
+}
+
+docBytes, err := os.ReadFile(docmapPath)
+if err != nil {
+    log.Fatalf("failed to read docmap: %v", err)
+}
+
+var docMap map[string]string
+if err := json.Unmarshal(docBytes, &docMap); err != nil {
+    log.Fatalf("failed to unmarshal docmap: %v", err)
+}
+
+vecFile, err := os.Open(vectorPath)
+if err != nil {
+    log.Fatalf("failed to open vectors: %v", err)
+}
+
+mmapBuf, err := mmap.Map(vecFile, mmap.RDONLY, 0)
+if err != nil {
+    log.Fatalf("mmap failed: %v", err)
+}
+```
+
+## Dockerfile
+
+The shard server uses a multi-stage build for minimal runtime image size:
+
+```dockerfile Dockerfile
+# ---------- build stage ----------
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -o shard-server ./cmd/shard
+
+# ---------- runtime stage ----------
+FROM alpine:3.20
+
+WORKDIR /app
+
+COPY --from=builder /app/shard-server .
+
+RUN mkdir -p /data
+
+EXPOSE 8080
+
+CMD ["./shard-server"]
+```
+
+<Steps>
+  <Step title="Build Stage">
+    Uses Go 1.25 Alpine image to compile the shard server binary with CGO disabled for static linking
+  </Step>
+  
+  <Step title="Runtime Stage">
+    Uses minimal Alpine 3.20 base image and copies only the compiled binary
+  </Step>
+  
+  <Step title="Data Directory">
+    Creates `/data` directory for volume mount point
+  </Step>
+</Steps>
+
+## Starting the System
+
+Launch all services:
+
+```bash
+docker-compose up -d
+```
+
+Verify all shards are running:
+
+```bash
+curl http://localhost:9001/health
+curl http://localhost:9002/health
+curl http://localhost:9003/health
+curl http://localhost:9004/health
+```
+
+<Note>
+  The Ollama service must download the `all-minilm` model on first startup. This may take several minutes depending on network speed.
+</Note>
+
+## Networking
+
+All services communicate on the `turbo-net` bridge network. The embedding client connects to Ollama using the service name:
+
+```go internal/embed/embed.go:19
+const ollamaURL = "http://ollama:11434/api/embeddings"
+```
+
+This allows shard servers to resolve `ollama` via Docker's DNS without hardcoding IP addresses.
+
+## Scaling Considerations
+
+<Warning>
+  Each shard has a maximum document capacity of 70,000 documents (internal/shard/shard.go:54). This limit is enforced by the pre-allocated mmap vector store size.
+</Warning>
+
+To scale beyond 280,000 documents (4 shards × 70,000):
+
+1. Add more shard services to `docker-compose.yml`
+2. Update the consistent hash ring in the indexer
+3. Re-index documents across the new shard topology

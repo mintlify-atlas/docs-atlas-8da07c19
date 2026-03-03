@@ -1,80 +1,269 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get up and running with Turbo Query in minutes using Docker Compose
 ---
 
-## Get started in three steps
+# Quickstart Guide
 
-Get your documentation site running locally and make your first customization.
+Get Turbo Query running locally in minutes and execute your first hybrid search query.
 
-### Step 1: Set up your local environment
+## Prerequisites
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+Before starting, ensure you have:
 
-### Step 2: Deploy your changes
+- **Docker** and **Docker Compose** installed
+- **curl** or any HTTP client for testing
+- At least **4GB** of available RAM (for 4 shards + Ollama)
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+## Launch the System
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/your-org/turbo-query.git
+    cd turbo-query
+    ```
+  </Step>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+  <Step title="Start all services with Docker Compose">
+    This will launch 4 shard servers and the Ollama embedding service:
 
-### Step 3: Go live
+    ```bash
+    docker-compose up -d
+    ```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    <Note>
+    The `docker-compose.yml` file starts:
+    - **4 shard servers** on ports 9001-9004 (mapped from internal port 8080)
+    - **Ollama** on port 11434 for MiniLM embeddings
+    </Note>
 
-## Next steps
+    Each shard server runs with these environment variables:
+    - `PORT=8080` - Internal HTTP server port (source/docker-compose.yml:6)
+    - `SHARD_ID=0,1,2,3` - Unique shard identifier (source/docker-compose.yml:7)
+  </Step>
 
-Now that you have your docs running, explore these key features:
+  <Step title="Verify services are running">
+    Check that all containers are healthy:
 
-<CardGroup cols={2}>
+    ```bash
+    docker-compose ps
+    ```
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+    You should see:
+    - `shard0` (port 9001)
+    - `shard1` (port 9002)
+    - `shard2` (port 9003)
+    - `shard3` (port 9004)
+    - `ollama` (port 11434)
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+    Test a shard health endpoint:
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+    ```bash
+    curl http://localhost:9001/health
+    ```
+  </Step>
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
+  <Step title="Execute your first search query">
+    Send a search request to any shard server. Here's an example searching shard0:
 
-</CardGroup>
+    <CodeGroup>
+    ```bash curl
+    curl -X POST http://localhost:9001/search \
+      -H "Content-Type: application/json" \
+      -d '{
+        "query": "distributed search engine",
+        "top_k": 10
+      }'
+    ```
+
+    ```python Python
+    import requests
+
+    response = requests.post(
+        "http://localhost:9001/search",
+        json={
+            "query": "distributed search engine",
+            "top_k": 10
+        }
+    )
+
+    results = response.json()
+    print(results)
+    ```
+
+    ```javascript JavaScript
+    const response = await fetch('http://localhost:9001/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: 'distributed search engine',
+        top_k: 10
+      })
+    });
+
+    const results = await response.json();
+    console.log(results);
+    ```
+    </CodeGroup>
+  </Step>
+</Steps>
+
+## Understanding the Request
+
+The search endpoint accepts a JSON payload with two fields:
+
+```json
+{
+  "query": "your search text",
+  "top_k": 10
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `query` | string | Yes | The search query text (source/internal/shardnode/types.go:4) |
+| `top_k` | integer | No | Number of results to return (default: 10) (source/internal/shardnode/types.go:5) |
+
+## Understanding the Response
+
+The API returns a JSON object containing an array of search hits:
+
+```json
+{
+  "hits": [
+    {
+      "doc_id": "42",
+      "score": 0.8734,
+      "shard_id": "0",
+      "title": "Introduction to Distributed Systems",
+      "text": "A distributed system is a collection of independent computers..."
+    }
+  ]
+}
+```
+
+Each hit includes (source/internal/shardnode/types.go:8-14):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `doc_id` | string | Document identifier within the shard |
+| `score` | float64 | Hybrid relevance score (0.7 × BM25 + 0.3 × cosine) |
+| `shard_id` | string | Which shard returned this result |
+| `title` | string | Document title |
+| `text` | string | Document content |
+
+<Info>
+The hybrid score combines:
+- **70% normalized BM25** for keyword relevance (source/internal/shardnode/routes.go:113)
+- **30% normalized cosine similarity** for semantic relevance
+</Info>
+
+## Query Flow
+
+When you send a search request, here's what happens:
+
+1. **Query Embedding** (source/internal/shardnode/routes.go:71)
+   - The query text is sent to Ollama for MiniLM embedding
+   - Returns a 384-dimensional normalized vector
+
+2. **BM25 Retrieval** (source/internal/shardnode/routes.go:77-85)
+   - Bleve performs full-text keyword search
+   - Retrieves top 100 candidates for reranking
+
+3. **Vector Reranking** (source/internal/shardnode/routes.go:99-114)
+   - For each candidate, fetch its vector from the mmap store
+   - Compute cosine similarity via dot product
+   - Calculate hybrid score: `0.7 × BM25_norm + 0.3 × cosine_norm`
+
+4. **Top-K Selection** (source/internal/shardnode/routes.go:132-138)
+   - Sort by hybrid score descending
+   - Return top K results with full metadata
+
+<Tip>
+Typical per-shard latency is **10-15ms** for local queries. The embedding generation step dominates the total query time.
+</Tip>
+
+## Testing Different Shards
+
+You can query individual shards directly to understand data distribution:
+
+<CodeGroup>
+```bash Shard 0 (port 9001)
+curl -X POST http://localhost:9001/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "machine learning", "top_k": 5}'
+```
+
+```bash Shard 1 (port 9002)
+curl -X POST http://localhost:9002/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "machine learning", "top_k": 5}'
+```
+
+```bash Shard 2 (port 9003)
+curl -X POST http://localhost:9003/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "machine learning", "top_k": 5}'
+```
+
+```bash Shard 3 (port 9004)
+curl -X POST http://localhost:9004/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "machine learning", "top_k": 5}'
+```
+</CodeGroup>
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+Documents are distributed across shards using consistent hashing. Different shards will return different documents for the same query.
 </Note>
+
+## Viewing Logs
+
+Monitor shard performance and query latency:
+
+```bash
+# All services
+docker-compose logs -f
+
+# Specific shard
+docker-compose logs -f shard0
+
+# See latency metrics
+docker-compose logs shard0 | grep latency
+```
+
+Example log output (source/internal/shardnode/routes.go:56-59):
+```
+shard=0 latency=12.4ms
+received search: distributed search engine
+```
+
+## Stopping the System
+
+When you're done:
+
+```bash
+# Stop all containers
+docker-compose down
+
+# Stop and remove volumes
+docker-compose down -v
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation Guide" icon="download" href="/installation">
+    Learn about manual installation and configuration options
+  </Card>
+  <Card title="Architecture Deep Dive" icon="sitemap" href="/architecture/overview">
+    Understand the distributed architecture and design decisions
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/search">
+    Explore all available endpoints and parameters
+  </Card>
+  <Card title="Indexing Data" icon="database" href="/development/indexing-pipeline">
+    Learn how to index your own documents
+  </Card>
+</CardGroup>

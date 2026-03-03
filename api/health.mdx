@@ -1,0 +1,120 @@
+---
+title: 'GET /health'
+description: 'Health check endpoint for monitoring shard node availability'
+---
+
+The `/health` endpoint provides a simple health check to verify that the shard node is running and accepting requests. This endpoint is used for monitoring and load balancer health checks.
+
+## Endpoint
+
+```
+GET /health
+```
+
+## Response
+
+Returns HTTP status `200 OK` with an empty response body when the shard node is healthy and operational.
+
+<ResponseField name="Status Code" type="integer">
+  Returns `200` when the service is healthy
+</ResponseField>
+
+<Note>
+  This endpoint does not return a response body. The HTTP 200 status code indicates the service is healthy.
+</Note>
+
+## Use Cases
+
+- **Load Balancer Health Checks**: Configure your load balancer to periodically ping this endpoint
+- **Service Monitoring**: Use with monitoring tools like Prometheus, Datadog, or AWS CloudWatch
+- **Kubernetes Liveness Probes**: Configure as a liveness probe in your Kubernetes deployment
+- **Deployment Verification**: Check service availability after deployment or restart
+
+## Examples
+
+<CodeGroup>
+```bash cURL
+curl -X GET http://localhost:8081/health
+```
+
+```python Python
+import requests
+
+response = requests.get("http://localhost:8081/health")
+if response.status_code == 200:
+    print("Shard node is healthy")
+else:
+    print(f"Health check failed: {response.status_code}")
+```
+
+```javascript JavaScript
+const response = await fetch('http://localhost:8081/health');
+
+if (response.ok) {
+  console.log('Shard node is healthy');
+} else {
+  console.log(`Health check failed: ${response.status}`);
+}
+```
+
+```go Go
+package main
+
+import (
+	"fmt"
+	"net/http"
+)
+
+func main() {
+	resp, err := http.Get("http://localhost:8081/health")
+	if err != nil {
+		fmt.Println("Health check failed:", err)
+		return
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode == http.StatusOK {
+		fmt.Println("Shard node is healthy")
+	}
+}
+```
+</CodeGroup>
+
+### Example Response
+
+```
+HTTP/1.1 200 OK
+Date: Mon, 01 Jan 2024 12:00:00 GMT
+Content-Length: 0
+```
+
+## Kubernetes Configuration Example
+
+Configure the health endpoint as a liveness probe in your Kubernetes deployment:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: turbo-query-shard
+spec:
+  template:
+    spec:
+      containers:
+      - name: shard-node
+        image: turbo-query:latest
+        ports:
+        - containerPort: 8081
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8081
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+```

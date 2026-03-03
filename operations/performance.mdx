@@ -1,0 +1,286 @@
+---
+title: Performance
+description: Understand Turbo Query's performance characteristics and tuning options
+---
+
+## Performance Overview
+
+Turbo Query achieves low-latency hybrid search through:
+
+- **Zero-copy vector access** via memory-mapped files
+- **BM25 candidate filtering** before expensive vector operations
+- **Normalized embeddings** for efficient cosine similarity via dot product
+- **Configurable rerank window** to balance accuracy and speed
+
+## Typical Latency
+
+Per-shard query latency in local deployment:
+
+<CodeGroup>
+```text Typical Range
+10-15 ms per shard
+```
+</CodeGroup>
+
+From README.md:107:
+
+> Typical shard latency per shard: **~10–15 ms** (local)
+
+This latency includes:
+
+1. Embedding generation (dominant cost)
+2. BM25 candidate retrieval
+3. Vector reranking
+4. Result sorting and serialization
+
+## Performance Characteristics
+
+### Embedding Generation Dominates Query Cost
+
+From README.md:108:
+
+> Embedding generation dominates query cost
+
+The Ollama API call for query embedding typically takes 8-12ms, representing 60-80% of total query latency. The embedding client has a 60-second timeout:
+
+```go internal/embed/embed.go:15-16
+var httpClient = &http.Client{
+    Timeout: 60 * time.Second,
+}
+```
+
+### Zero-Copy Vector Access
+
+From README.md:109:
+
+> `mmap` enables zero-copy vector access
+
+The vector store uses memory-mapped I/O to avoid copying data from kernel to user space:
+
+```go internal/shardnode/server.go:70-73
+vecFile, err := os.Open(vectorPath)
+if err != nil {
+    log.Fatalf("failed to open vectors: %v", err)
+}
+
+mmapBuf, err := mmap.Map(vecFile, mmap.RDONLY, 0)
+if err != nil {
+    log.Fatalf("mmap failed: %v", err)
+}
+```
+
+Vector retrieval directly reads from the mapped buffer (internal/shardnode/routes.go:25-44):
+
+```go
+func (s *Server) getVector(docID uint32) []float32 {
+    start := int(docID) * vectorDim * 4
+    end := start + vectorDim*4
+
+    if start < 0 || end > len(s.mmapBuf) {
+        log.Printf(
+            "vector OOB: docID=%d start=%d end=%d mmap=%d",
+            docID, start, end, len(s.mmapBuf),
+        )
+        return nil
+    }
+
+    raw := s.mmapBuf[start:end]
+
+    vec := make([]float32, vectorDim)
+    for i := 0; i < vectorDim; i++ {
+        bits := binary.LittleEndian.Uint32(raw[i*4:])
+        vec[i] = math.Float32frombits(bits)
+    }
+    return vec
+}
+```
+
+## Rerank Window Configuration
+
+The rerank window controls how many BM25 candidates undergo vector reranking:
+
+```go internal/shardnode/routes.go:21
+const rerankWindow = 100 // BM25 candidates
+```
+
+This configuration:
+
+- Retrieves top 100 BM25 results from Bleve
+- Computes vector similarity for each candidate
+- Applies hybrid fusion scoring
+- Returns final top-K results
+
+### Tuning the Rerank Window
+
+<ParamField path="rerankWindow" type="int" default="100">
+  Number of BM25 candidates to rerank with vector similarity
+</ParamField>
+
+**Trade-offs:**
+
+| Window Size | Accuracy | Latency | Best For |
+|-------------|----------|---------|----------|
+| 50          | Lower    | Faster  | High-throughput scenarios |
+| 100         | Good     | Balanced| General use (default) |
+| 200         | Higher   | Slower  | Maximum recall requirements |
+
+<Warning>
+  Increasing the rerank window linearly increases the number of vector dot products, which can significantly impact latency for large windows.
+</Warning>
+
+## Max Documents Per Shard
+
+Each shard has a hard limit on document capacity:
+
+```go internal/shard/shard.go:54
+maxDocsPerShard = 70000
+```
+
+This limit is enforced by the pre-allocated mmap file size:
+
+```go
+vectorDim       = embed.Dim  // 384
+vectorBytes     = vectorDim * 4  // 1,536 bytes per vector
+```
+
+Total vector file size per shard:
+
+```text
+70,000 documents × 1,536 bytes = 107.5 MB
+```
+
+<Note>
+  The mmap buffer is allocated at indexing time and cannot grow dynamically. Exceeding this limit will cause a panic with "mmap overflow" error.
+</Note>
+
+## Vector Dimension
+
+All vectors use the MiniLM embedding dimension:
+
+```go internal/shardnode/routes.go:22
+const vectorDim = 384
+```
+
+This matches the output of the `all-minilm` model from Ollama (internal/embed/embed.go:13):
+
+```go
+const Dim = 384
+```
+
+## Hybrid Scoring Weights
+
+The hybrid fusion formula balances BM25 and semantic similarity:
+
+```go internal/shardnode/routes.go:113
+final := 0.7*normBM25 + 0.3*normCos
+```
+
+**Weight Distribution:**
+
+- **70% BM25** - Lexical/keyword relevance
+- **30% Cosine** - Semantic similarity
+
+Both scores are normalized before fusion:
+
+```go internal/shardnode/routes.go:108-111
+cos := dot(qvec, dvec)
+normCos := (cos + 1) / 2  // map [-1, 1] to [0, 1]
+
+normBM25 := hit.Score / maxBM25
+```
+
+<Tip>
+  Adjust these weights based on your use case. Technical documentation may benefit from higher BM25 weight (0.8), while semantic search tasks may prefer higher cosine weight (0.5).
+</Tip>
+
+## Vector Normalization
+
+All document and query vectors are L2-normalized so cosine similarity equals dot product:
+
+```go internal/embed/embed.go:32-47
+func normalize(vec []float32) {
+    var sum float64
+    for _, v := range vec {
+        sum += float64(v * v)
+    }
+
+    norm := float32(math.Sqrt(sum))
+    if norm == 0 {
+        return
+    }
+
+    inv := 1.0 / norm
+    for i := range vec {
+        vec[i] *= inv
+    }
+}
+```
+
+From internal/embed/embed.go:104-106:
+
+```go
+//pre normalizing the vectors so that Cosine becomes dot product only.
+//global normalization
+//more consistent ranking
+```
+
+This optimization eliminates the need to compute vector magnitudes during query time:
+
+```go internal/shardnode/routes.go:46-52
+func dot(a, b []float32) float64 {
+    var sum float64
+    for i := 0; i < len(a); i++ {
+        sum += float64(a[i] * b[i])
+    }
+    return sum
+}
+```
+
+## Batch Indexing
+
+The indexer uses batched writes to Bleve for better throughput:
+
+```go internal/shard/shard.go:191
+const batchSize = 100
+```
+
+From the shard writer loop (internal/shard/shard.go:203-211):
+
+```go
+s.Batch.Index(doc.GlobalID, map[string]interface{}{
+    "title": doc.Title,
+    "text":  doc.Text,
+})
+
+if s.Batch.Size() >= batchSize {
+    s.Index.Batch(s.Batch)
+    s.Batch = s.Index.NewBatch()
+}
+```
+
+Batching reduces the number of disk syncs and improves indexing throughput by ~5-10x compared to individual document writes.
+
+## Server Timeouts
+
+The HTTP server configures conservative timeouts:
+
+```go internal/shardnode/server.go:83-88
+return &http.Server{
+    Addr:         fmt.Sprintf(":%d", port),
+    Handler:      s.RegisterRoutes(),
+    ReadTimeout:  10 * time.Second,
+    WriteTimeout: 30 * time.Second,
+}
+```
+
+<ParamField path="ReadTimeout" type="duration" default="10s">
+  Maximum time to read the entire request, including body
+</ParamField>
+
+<ParamField path="WriteTimeout" type="duration" default="30s">
+  Maximum time to write the response. Covers embedding generation + search + serialization.
+</ParamField>
+
+<Warning>
+  If embedding generation takes longer than 30s, the client will receive a timeout error. The Ollama timeout (60s) is higher to allow retries, but the HTTP server will still close the connection.
+</Warning>

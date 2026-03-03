@@ -1,0 +1,110 @@
+---
+title: Architecture Overview
+description: Understand Turbo Query's distributed hybrid search architecture
+---
+
+## System Architecture
+
+Turbo Query is a high-performance distributed search system that combines BM25 keyword retrieval with semantic vector search. The architecture follows a distributed fan-out query model where a coordinator distributes queries across multiple shard servers.
+
+### Query Flow
+
+The system processes queries through the following pipeline:
+
+```
+User Query
+    ↓
+Coordinator (fan-out — pending)
+    ↓
+Shard Servers (parallel)
+    ↓
+BM25 retrieve → Vector rerank → Hybrid score
+    ↓
+Top-K merge → Response
+```
+
+<Note>
+  The current checkpoint implements per-shard querying. Parallel coordinator fan-out is in progress.
+</Note>
+
+### Shard Components
+
+Each shard server maintains four critical components:
+
+1. **Bleve Inverted Index** - Full-text search index for BM25 keyword retrieval
+2. **Memory-Mapped Vector Store** - Dense embeddings stored in `vectors.bin`
+3. **Document ID Mapping** - Global-to-local document ID translation
+4. **HTTP Search Endpoint** - Per-shard query interface
+
+### Tech Stack
+
+| Layer | Technology |
+|-------|------------|
+| Language | Go |
+| HTTP Router | chi |
+| Full-text Search | Bleve |
+| Embeddings | all-MiniLM via Ollama |
+| Containerization | Docker & Docker Compose |
+| Vector Storage | mmap-backed binary file |
+
+### Shard Server Implementation
+
+The shard server loads its index, vector store, and document mapping on startup:
+
+```go internal/shardnode/server.go
+type Server struct {
+	port    int
+	shardID string
+	index   bleve.Index
+	docMap  map[string]string
+	mmapBuf mmap.MMap
+}
+
+func NewServer() *http.Server {
+	shardID := os.Getenv("SHARD_ID")
+	indexPath := "/data/index.bleve"
+	vectorPath := "/data/vectors.bin"
+	
+	idx, err := bleve.Open(indexPath)
+	// ...
+	
+	vecFile, err := os.Open(vectorPath)
+	mmapBuf, err := mmap.Map(vecFile, mmap.RDONLY, 0)
+	// ...
+}
+```
+
+### Performance Characteristics
+
+- **Typical per-shard latency**: 10-15ms (local)
+- **Embedding generation**: Dominates query cost
+- **Vector access**: Zero-copy via mmap
+- **Rerank window**: Configurable (default 100)
+
+<Info>
+  Memory-mapped I/O enables zero-copy vector reads, eliminating serialization overhead.
+</Info>
+
+## Deployment Architecture
+
+Turbo Query runs as a multi-container application orchestrated by Docker Compose. The system includes:
+
+- **4 Shard Servers** (ports 9001-9004)
+- **Ollama Embedding Service** (port 11434)
+- **Shared Network** for inter-service communication
+
+Each shard operates independently with its own data volume, enabling horizontal scaling.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Sharding" icon="arrows-split-up-and-left" href="/architecture/sharding">
+    Learn about consistent hash-based document routing
+  </Card>
+  <Card title="Vector Storage" icon="database" href="/architecture/vector-storage">
+    Explore memory-mapped vector storage design
+  </Card>
+  <Card title="Hybrid Scoring" icon="chart-mixed" href="/architecture/hybrid-scoring">
+    Understand BM25 + semantic ranking
+  </Card>
+</CardGroup>

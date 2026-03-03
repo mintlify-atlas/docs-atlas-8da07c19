@@ -1,0 +1,475 @@
+---
+title: 'Indexing Pipeline'
+description: 'Understand the offline indexing pipeline that powers Turbo Query'
+---
+
+The offline indexing pipeline transforms raw Wikipedia JSON data into a distributed, searchable index with precomputed embeddings. The pipeline is designed for high throughput, processing documents in parallel through a multi-stage architecture.
+
+## Pipeline Overview
+
+The indexing process consists of 6 coordinated stages:
+
+1. **Wiki JSON ingestion** - Stream and parse newline-delimited JSON
+2. **MiniLM embedding generation** - Parallel text embedding with workers
+3. **Vector normalization and mmap write** - L2-normalize and persist vectors
+4. **Consistent hash routing** - Distribute documents across shards
+5. **Bleve batch indexing** - Build inverted indexes per shard
+6. **DocID alignment persistence** - Save global-to-local ID mappings
+
+<Info>
+  All vectors are L2-normalized during indexing so cosine similarity can be computed efficiently via dot product at query time.
+</Info>
+
+## Architecture
+
+The pipeline runs 4 parallel workers by default, distributing documents across 4 shards using a consistent hash ring with 128 virtual nodes per shard.
+
+```go
+numShards := 4
+numWorkers := 4
+vnodes := 128
+```
+
+From `internal/shard/main.go:12-14`
+
+## Stage 1: Wiki JSON Ingestion
+
+The `ingestWiki` function streams the input file line-by-line, parsing each JSON document and sending it to the worker pool.
+
+```go
+func ingestWiki(path string, jobs chan<- IndexJob) error {
+    file, err := os.Open(path)
+    if err != nil {
+        return err
+    }
+    defer file.Close()
+
+    scanner := bufio.NewScanner(file)
+
+    // IMPORTANT: increase buffer for wiki
+    buf := make([]byte, 0, 1024*1024)
+    scanner.Buffer(buf, 10*1024*1024)
+
+    for scanner.Scan() {
+        line := scanner.Bytes()
+
+        var doc WikiDoc
+        if err := json.Unmarshal(line, &doc); err != nil {
+            continue
+        }
+
+        jobs <- IndexJob{
+            ID:    doc.ID,
+            Text:  doc.Text,
+            Title: doc.Title,
+        }
+    }
+
+    return scanner.Err()
+}
+```
+
+From `internal/shard/shard.go:111-140`
+
+<Note>
+  The scanner buffer is increased to 10MB to handle large Wikipedia articles without truncation.
+</Note>
+
+### Data Types
+
+```go
+type WikiDoc struct {
+    ID    string `json:"id"`
+    Title string `json:"title"`
+    Text  string `json:"text"`
+}
+
+type IndexJob struct {
+    ID    string
+    Title string
+    Text  string
+}
+```
+
+From `internal/shard/shard.go:28-38`
+
+## Stage 2: Embedding Generation
+
+Worker goroutines consume jobs from the channel, generate embeddings via Ollama, and output prepared documents.
+
+```go
+func worker(jobs <-chan IndexJob, out chan<- PreparedDoc) {
+    for job := range jobs {
+        const maxEmbedChars = 800
+        text := job.Title + " " + job.Text
+        if len(text) > maxEmbedChars {
+            text = text[:maxEmbedChars]
+        }
+        vec := embed.Embed(text)
+        //fallback
+        if len(vec) == 0 && len(text) > 200 {
+            text = text[:200]
+            vec = embed.Embed(text)
+        }
+
+        if len(vec) == 0 {
+            continue
+        }
+
+        out <- PreparedDoc{
+            GlobalID: job.ID,
+            Title:    job.Title,
+            Text:     job.Text,
+            Vector:   vec,
+        }
+    }
+}
+```
+
+From `internal/shard/shard.go:142-168`
+
+### Embedding Fallback Logic
+
+The pipeline includes robust error handling:
+
+<Steps>
+  <Step title="First attempt">
+    Concatenate title and text, truncate to 800 characters, generate embedding
+  </Step>
+  <Step title="Fallback attempt">
+    If embedding fails and text > 200 chars, truncate to 200 and retry
+  </Step>
+  <Step title="Skip document">
+    If both attempts fail, skip the document entirely
+  </Step>
+</Steps>
+
+```go
+const maxEmbedChars = 800
+text := job.Title + " " + job.Text
+if len(text) > maxEmbedChars {
+    text = text[:maxEmbedChars]
+}
+vec := embed.Embed(text)
+//fallback
+if len(vec) == 0 && len(text) > 200 {
+    text = text[:200]
+    vec = embed.Embed(text)
+}
+```
+
+From `internal/shard/shard.go:144-154`
+
+### PreparedDoc Type
+
+```go
+type PreparedDoc struct {
+    GlobalID string
+    Title    string
+    Text     string
+    Vector   []float32
+}
+```
+
+From `internal/shard/shard.go:40-45`
+
+## Stage 3: Vector Normalization
+
+Vectors are L2-normalized using the `normalize` function from the `embed` package:
+
+```go
+func normalize(vec []float32) {
+    var sum float64
+    for _, v := range vec {
+        sum += float64(v * v)
+    }
+
+    norm := float32(math.Sqrt(sum))
+    if norm == 0 {
+        return
+    }
+
+    inv := 1.0 / norm
+    for i := range vec {
+        vec[i] *= inv
+    }
+}
+```
+
+From `internal/embed/embed.go:32-47`
+
+Normalized vectors are written to memory-mapped files using the `writeVector` function:
+
+```go
+func writeVector(s *Shard, id uint32, vec []float32) {
+    dim := embed.Dim
+
+    offset := int64(id) * int64(dim*4)
+    size := int64(dim * 4)
+    end := offset + size
+    if end > int64(len(s.Mmap)) {
+        panic("mmap overflow")
+    }
+    copy(s.Mmap[offset:end], float32SliceToBytes(vec))
+}
+```
+
+From `internal/shard/shard.go:179-189`
+
+<Info>
+  Each vector occupies exactly `384 dimensions × 4 bytes = 1,536 bytes` in the mmap file.
+</Info>
+
+## Stage 4: Consistent Hash Routing
+
+The router function distributes documents across shards using a hash ring:
+
+```go
+func router(ring *HashRing, in <-chan PreparedDoc, shardChans []chan PreparedDoc) {
+    for doc := range in {
+        shardID := ring.ShardFor(doc.GlobalID)
+        shardChans[shardID] <- doc
+    }
+    for _, ch := range shardChans {
+        close(ch)
+    }
+}
+```
+
+From `internal/shard/shard.go:170-178`
+
+### Hash Ring Implementation
+
+```go
+type HashRing struct {
+    positions []uint32       // sorted
+    shardMap  map[uint32]int // position -> shardID
+}
+
+func (r *HashRing) ShardFor(key string) int {
+    h := hash32(key)
+
+    // binary search
+    idx := sort.Search(len(r.positions), func(i int) bool {
+        return r.positions[i] >= h
+    })
+
+    // wrap around ring
+    if idx == len(r.positions) {
+        idx = 0
+    }
+
+    pos := r.positions[idx]
+    return r.shardMap[pos]
+}
+```
+
+From `internal/shard/shard.go:46-109`
+
+## Stage 5: Bleve Batch Indexing
+
+Each shard runs a dedicated writer goroutine that indexes documents in batches:
+
+```go
+const batchSize = 100
+
+func shardWriter(s *Shard, ch <-chan PreparedDoc) {
+    for doc := range ch {
+
+        localID := s.NextDocID
+        s.NextDocID++
+
+        writeVector(s, localID, doc.Vector)
+
+        s.DocMap[doc.GlobalID] = localID
+
+        s.Batch.Index(doc.GlobalID, map[string]interface{}{
+            "title": doc.Title,
+            "text":  doc.Text,
+        })
+
+        if s.Batch.Size() >= batchSize {
+            s.Index.Batch(s.Batch)
+            s.Batch = s.Index.NewBatch()
+        }
+
+        fmt.Println("shard", s.ID, "indexed", doc.GlobalID)
+    }
+    if s.Batch.Size() > 0 {
+        s.Index.Batch(s.Batch)
+    }
+}
+```
+
+From `internal/shard/shard.go:191-218`
+
+<Warning>
+  The batch size of 100 balances throughput and memory usage. Larger batches improve indexing speed but increase memory consumption.
+</Warning>
+
+### Shard Structure
+
+```go
+type Shard struct {
+    ID        int
+    Index     bleve.Index
+    NextDocID uint32
+    DocMap    map[string]uint32
+    VecFile   *os.File
+    Mmap      mmap.MMap
+    Batch     *bleve.Batch
+}
+```
+
+From `internal/shard/shard.go:18-26`
+
+## Stage 6: DocID Persistence
+
+After indexing completes, each shard saves its global-to-local ID mapping:
+
+```go
+func saveDocMap(shardDir string, docMap map[string]uint32) error {
+    path := filepath.Join(shardDir, "docmap.json")
+
+    // invert map to localID -> globalID
+    inv := make(map[uint32]string, len(docMap))
+    for gid, lid := range docMap {
+        inv[lid] = gid
+    }
+
+    data, err := json.MarshalIndent(inv, "", "  ")
+    if err != nil {
+        return err
+    }
+
+    return os.WriteFile(path, data, 0644)
+}
+```
+
+From `internal/shard/init.go:70-85`
+
+The mapping is inverted (local → global) for efficient lookup during query time.
+
+## Storage Initialization
+
+Each shard pre-allocates storage for up to 70,000 documents:
+
+```go
+const (
+    vectorDim       = embed.Dim
+    vectorBytes     = vectorDim * 4
+    maxDocsPerShard = 70000
+)
+
+func initShardStorage(baseDir string, shardID int) (*os.File, mmap.MMap, error) {
+    shardDir := filepath.Join(baseDir, fmt.Sprintf("shard-%d", shardID))
+
+    // create shard directory
+    if err := os.MkdirAll(shardDir, 0755); err != nil {
+        return nil, nil, err
+    }
+
+    vecPath := filepath.Join(shardDir, "vectors.bin")
+
+    file, err := os.OpenFile(vecPath, os.O_CREATE|os.O_RDWR, 0644)
+    if err != nil {
+        return nil, nil, err
+    }
+
+    // pre-size file
+    size := int64(maxDocsPerShard * vectorBytes)
+    if err := file.Truncate(size); err != nil {
+        file.Close()
+        return nil, nil, err
+    }
+
+    // mmap the file
+    mm, err := mmap.MapRegion(
+        file,
+        int(size),
+        mmap.RDWR,
+        0,
+        0,
+    )
+    if err != nil {
+        file.Close()
+        return nil, nil, err
+    }
+
+    return file, mm, nil
+}
+```
+
+From `internal/shard/shard.go:51-55` and `internal/shard/init.go:13-49`
+
+## Pipeline Orchestration
+
+The main function coordinates all stages:
+
+```go
+// Create channels
+jobs := make(chan IndexJob, 1000)
+prepared := make(chan PreparedDoc, 1000)
+shardChans := make([]chan PreparedDoc, numShards)
+
+// Start shard writers
+for i := 0; i < numShards; i++ {
+    shardWg.Add(1)
+    go func(s *Shard, ch chan PreparedDoc) {
+        defer shardWg.Done()
+        shardWriter(s, ch)
+    }(shards[i], shardChans[i])
+}
+
+// Start embedding workers
+var workerWg sync.WaitGroup
+for i := 0; i < numWorkers; i++ {
+    workerWg.Add(1)
+    go func() {
+        defer workerWg.Done()
+        worker(jobs, prepared)
+    }()
+}
+
+// Start router
+go router(ring, prepared, shardChans)
+
+// Start ingestion
+go func() {
+    err := ingestWiki("wiki_120k.json", jobs)
+    if err != nil {
+        fmt.Println("ingest error:", err)
+    }
+    close(jobs)
+}()
+```
+
+From `internal/shard/main.go:19-77`
+
+## Performance Considerations
+
+<CardGroup cols={2}>
+  <Card title="Parallel Processing" icon="gears">
+    4 worker goroutines generate embeddings concurrently
+  </Card>
+  <Card title="Batch Indexing" icon="layer-group">
+    Batches of 100 documents reduce Bleve write overhead
+  </Card>
+  <Card title="Memory Mapping" icon="memory">
+    Zero-copy vector access via mmap during queries
+  </Card>
+  <Card title="Buffered Channels" icon="stream">
+    1,000-item buffers prevent pipeline stalls
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Query Pipeline" href="/api/search" icon="magnifying-glass">
+    Learn how queries use these indexes
+  </Card>
+  <Card title="Contributing" href="/development/contributing" icon="code">
+    Set up your development environment
+  </Card>
+</CardGroup>

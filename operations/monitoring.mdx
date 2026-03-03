@@ -1,0 +1,342 @@
+---
+title: Monitoring
+description: Monitor Turbo Query shard servers and track performance metrics
+---
+
+## Health Endpoint
+
+Each shard server exposes a health check endpoint:
+
+```go internal/shardnode/routes.go:155-157
+r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(http.StatusOK)
+})
+```
+
+### Health Check Example
+
+Check all shard servers:
+
+```bash
+for port in 9001 9002 9003 9004; do
+  curl -f http://localhost:$port/health && echo "Shard OK" || echo "Shard DOWN"
+done
+```
+
+Expected response:
+
+```text
+HTTP/1.1 200 OK
+```
+
+<Note>
+  The health endpoint returns 200 OK if the server is running, but does not verify index or mmap file integrity. Consider implementing deeper health checks for production deployments.
+</Note>
+
+## Per-Shard Latency Logging
+
+Every search request logs latency to standard output:
+
+```go internal/shardnode/routes.go:54-60
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+    start := time.Now()
+    defer func() {
+        log.Printf("shard=%s latency=%v",
+            s.shardID,
+            time.Since(start),
+        )
+    }()
+    // ... search logic
+}
+```
+
+### Example Log Output
+
+```text
+2026/03/03 14:23:45 shard=0 latency=12.3ms
+2026/03/03 14:23:45 shard=1 latency=11.8ms
+2026/03/03 14:23:46 shard=2 latency=15.2ms
+2026/03/03 14:23:46 shard=3 latency=10.9ms
+```
+
+<Tip>
+  Parse these logs with tools like `jq`, `awk`, or log aggregation systems (ELK, Loki) to compute p50, p95, and p99 latencies.
+</Tip>
+
+## Monitoring Shard Servers
+
+### Container Health
+
+Check Docker container status:
+
+```bash
+docker-compose ps
+```
+
+Expected output:
+
+```text
+NAME      IMAGE              COMMAND              STATUS         PORTS
+shard0    turbo-query        "./shard-server"     Up 2 hours     0.0.0.0:9001->8080/tcp
+shard1    turbo-query        "./shard-server"     Up 2 hours     0.0.0.0:9002->8080/tcp
+shard2    turbo-query        "./shard-server"     Up 2 hours     0.0.0.0:9003->8080/tcp
+shard3    turbo-query        "./shard-server"     Up 2 hours     0.0.0.0:9004->8080/tcp
+ollama    ollama/ollama      "/bin/ollama serve"  Up 2 hours     0.0.0.0:11434->11434/tcp
+```
+
+### Viewing Logs
+
+Tail logs for a specific shard:
+
+```bash
+docker-compose logs -f shard0
+```
+
+Tail logs for all shards:
+
+```bash
+docker-compose logs -f shard0 shard1 shard2 shard3
+```
+
+### Startup Logs
+
+Successful shard startup sequence:
+
+```text
+2026/03/03 12:00:00 starting shard: 0
+2026/03/03 12:00:01 starting shard server on :8080
+```
+
+From internal/shardnode/server.go:44 and cmd/shard/main.go:12:
+
+```go
+log.Println("starting shard:", shardID)
+// ...
+log.Println("starting shard server on", srv.Addr)
+```
+
+## Timeout Configuration
+
+### HTTP Server Timeouts
+
+```go internal/shardnode/server.go:86-87
+ReadTimeout:  10 * time.Second,
+WriteTimeout: 30 * time.Second,
+```
+
+<ParamField path="ReadTimeout" type="duration" default="10s">
+  Maximum time to read the entire HTTP request
+</ParamField>
+
+<ParamField path="WriteTimeout" type="duration" default="30s">
+  Maximum time to write the HTTP response, including search processing
+</ParamField>
+
+<Warning>
+  Queries that exceed 30 seconds will timeout and return an error to the client. This typically indicates issues with embedding generation or the Bleve index.
+</Warning>
+
+### Ollama Timeout
+
+The embedding client has a separate timeout for Ollama API calls:
+
+```go internal/embed/embed.go:15-17
+var httpClient = &http.Client{
+    Timeout: 60 * time.Second,
+}
+```
+
+<ParamField path="Timeout" type="duration" default="60s">
+  Maximum time to wait for embedding generation from Ollama
+</ParamField>
+
+If Ollama takes longer than 60 seconds, the embedding request fails and returns `nil`:
+
+```go internal/embed/embed.go:66-69
+resp, err := httpClient.Do(req)
+if err != nil {
+    log.Println("embed http error:", err)
+    return nil
+}
+```
+
+## Error Logging
+
+### Embedding Failures
+
+When embedding generation fails:
+
+```text
+2026/03/03 14:23:45 embed http error: Post "http://ollama:11434/api/embeddings": context deadline exceeded
+```
+
+Or when Ollama returns non-200 status:
+
+```text
+2026/03/03 14:23:45 ollama non-200: 500 Internal Server Error
+```
+
+From internal/embed/embed.go:72-75:
+
+```go
+if resp.StatusCode != http.StatusOK {
+    body, _ := io.ReadAll(resp.Body)
+    log.Println("ollama non-200:", resp.StatusCode, string(body))
+    return nil
+}
+```
+
+### Vector Out-of-Bounds
+
+When attempting to access a document ID beyond the mmap buffer:
+
+```text
+2026/03/03 14:23:45 vector OOB: docID=75000 start=115200000 end=115201536 mmap=107520000
+```
+
+From internal/shardnode/routes.go:29-35:
+
+```go
+if start < 0 || end > len(s.mmapBuf) {
+    log.Printf(
+        "vector OOB: docID=%d start=%d end=%d mmap=%d",
+        docID, start, end, len(s.mmapBuf),
+    )
+    return nil
+}
+```
+
+<Warning>
+  Vector OOB errors indicate the shard has exceeded its maximum document capacity (70,000 documents). This is a critical error that requires re-sharding the data.
+</Warning>
+
+## Query Monitoring
+
+The search handler logs each incoming query:
+
+```go internal/shardnode/routes.go:66
+log.Println("received search:", req.Query)
+```
+
+Example output:
+
+```text
+2026/03/03 14:23:45 received search: distributed systems consensus
+```
+
+### Embedding Vector Length
+
+The embedding function logs the vector dimension:
+
+```go internal/embed/embed.go:99
+log.Println("embedding length:", len(vec))
+```
+
+Expected output:
+
+```text
+2026/03/03 14:23:45 embedding length: 384
+```
+
+<Note>
+  If the embedding length is not 384, it indicates a model mismatch or corrupted embedding response.
+</Note>
+
+## Metrics Collection
+
+While Turbo Query does not include built-in metrics exporters, you can instrument the codebase with:
+
+### Prometheus Integration
+
+Add the Prometheus Go client:
+
+```go
+import (
+    "github.com/prometheus/client_golang/prometheus"
+    "github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var (
+    searchLatency = prometheus.NewHistogramVec(
+        prometheus.HistogramOpts{
+            Name: "turbo_query_search_duration_seconds",
+            Help: "Search request duration",
+        },
+        []string{"shard_id"},
+    )
+)
+```
+
+Expose metrics endpoint:
+
+```go
+r.Get("/metrics", promhttp.Handler().ServeHTTP)
+```
+
+### OpenTelemetry Tracing
+
+For distributed tracing across shards:
+
+```go
+import "go.opentelemetry.io/otel"
+
+tracer := otel.Tracer("turbo-query")
+ctx, span := tracer.Start(r.Context(), "shard.search")
+defer span.End()
+```
+
+## Ollama Monitoring
+
+Check Ollama service health:
+
+```bash
+curl http://localhost:11434/api/tags
+```
+
+Verify the `all-minilm` model is loaded:
+
+```json
+{
+  "models": [
+    {
+      "name": "all-minilm",
+      "modified_at": "2026-03-03T12:00:00Z",
+      "size": 45000000
+    }
+  ]
+}
+```
+
+<Tip>
+  If the model is not listed, pull it manually:
+  
+  ```bash
+  docker exec ollama ollama pull all-minilm
+  ```
+</Tip>
+
+## Production Monitoring Recommendations
+
+For production deployments, consider:
+
+<Steps>
+  <Step title="Log Aggregation">
+    Use ELK Stack, Loki, or Splunk to centralize logs from all shard containers
+  </Step>
+  
+  <Step title="Metrics Collection">
+    Integrate Prometheus and Grafana for real-time dashboards
+  </Step>
+  
+  <Step title="Distributed Tracing">
+    Implement OpenTelemetry to trace requests across shard fan-out
+  </Step>
+  
+  <Step title="Alerting">
+    Configure alerts for:
+    - Shard server downtime
+    - High latency (p95 > 50ms)
+    - Embedding failures
+    - Vector OOB errors
+  </Step>
+</Steps>

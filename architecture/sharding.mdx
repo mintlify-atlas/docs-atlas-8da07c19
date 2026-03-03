@@ -1,0 +1,190 @@
+---
+title: Consistent Hash Sharding
+description: How Turbo Query distributes documents across shards using consistent hashing
+---
+
+## Overview
+
+Turbo Query uses consistent hashing to distribute documents across shards. This approach ensures even distribution, minimal data movement during shard additions, and deterministic routing.
+
+## Hash Ring Implementation
+
+The hash ring uses virtual nodes (vnodes) to improve distribution uniformity:
+
+```go internal/shard/shard.go
+type HashRing struct {
+	positions []uint32       // sorted positions on ring
+	shardMap  map[uint32]int // position -> shardID
+}
+
+func hash32(key string) uint32 {
+	h := fnv.New32a()
+	h.Write([]byte(key))
+	return h.Sum32()
+}
+```
+
+### Creating the Hash Ring
+
+The ring is initialized with multiple virtual nodes per shard to improve balance:
+
+```go internal/shard/shard.go
+func NewHashRing(numShards int, vnodes int) *HashRing {
+	r := &HashRing{
+		shardMap: make(map[uint32]int),
+	}
+
+	for shardID := 0; shardID < numShards; shardID++ {
+		for v := 0; v < vnodes; v++ {
+			// Create virtual node key
+			key := fmt.Sprintf("shard-%d-vnode-%d", shardID, v)
+			pos := hash32(key)
+
+			r.positions = append(r.positions, pos)
+			r.shardMap[pos] = shardID
+		}
+	}
+
+	// Sort positions for binary search
+	sort.Slice(r.positions, func(i, j int) bool {
+		return r.positions[i] < r.positions[j]
+	})
+
+	return r
+}
+```
+
+<Info>
+  Virtual nodes improve distribution by creating multiple hash positions per physical shard.
+</Info>
+
+## Document Routing
+
+Each document is routed to a shard by hashing its ID and finding the next position on the ring:
+
+```go internal/shard/shard.go
+func (r *HashRing) ShardFor(key string) int {
+	h := hash32(key)
+
+	// Binary search for next position
+	idx := sort.Search(len(r.positions), func(i int) bool {
+		return r.positions[i] >= h
+	})
+
+	// Wrap around ring if needed
+	if idx == len(r.positions) {
+		idx = 0
+	}
+
+	pos := r.positions[idx]
+	return r.shardMap[pos]
+}
+```
+
+### Routing Algorithm
+
+1. **Hash the document ID** using FNV-1a (32-bit)
+2. **Binary search** to find the next position on the sorted ring
+3. **Wrap around** if hash exceeds all positions
+4. **Map position** to physical shard ID
+
+<Note>
+  FNV-1a provides fast, uniform hashing suitable for consistent hash rings.
+</Note>
+
+## 4-Shard Deployment
+
+The production deployment uses 4 shards configured in Docker Compose:
+
+```yaml docker-compose.yml
+services:
+  shard0:
+    container_name: shard0
+    environment:
+      - SHARD_ID=0
+    ports:
+      - "9001:8080"
+
+  shard1:
+    container_name: shard1
+    environment:
+      - SHARD_ID=1
+    ports:
+      - "9002:8080"
+
+  shard2:
+    container_name: shard2
+    environment:
+      - SHARD_ID=2
+    ports:
+      - "9003:8080"
+
+  shard3:
+    container_name: shard3
+    environment:
+      - SHARD_ID=3
+    ports:
+      - "9004:8080"
+```
+
+Each shard:
+- Runs on a dedicated port (9001-9004)
+- Maintains independent data volumes
+- Processes queries in parallel
+
+## Indexing Pipeline Integration
+
+During indexing, the hash ring routes documents to their assigned shards:
+
+```go internal/shard/shard.go
+func router(ring *HashRing, in <-chan PreparedDoc, shardChans []chan PreparedDoc) {
+	for doc := range in {
+		shardID := ring.ShardFor(doc.GlobalID)
+		shardChans[shardID] <- doc
+	}
+	for _, ch := range shardChans {
+		close(ch)
+	}
+}
+```
+
+The router function:
+1. Receives prepared documents with embeddings
+2. Determines target shard using `ShardFor()`
+3. Sends document to shard-specific channel
+4. Enables parallel shard writing
+
+<Tip>
+  Using channels for shard routing enables concurrent indexing across all shards.
+</Tip>
+
+## Benefits of Consistent Hashing
+
+<AccordionGroup>
+  <Accordion title="Even Distribution">
+    Virtual nodes ensure documents are distributed uniformly across shards, preventing hotspots.
+  </Accordion>
+  
+  <Accordion title="Minimal Resharding">
+    Adding or removing shards only affects documents in adjacent hash ranges, not the entire dataset.
+  </Accordion>
+  
+  <Accordion title="Deterministic Routing">
+    Same document ID always routes to the same shard, enabling efficient lookups and updates.
+  </Accordion>
+  
+  <Accordion title="Horizontal Scalability">
+    New shards can be added by increasing the ring size and rebalancing affected ranges.
+  </Accordion>
+</AccordionGroup>
+
+## Related Topics
+
+<CardGroup cols={2}>
+  <Card title="Vector Storage" icon="database" href="/architecture/vector-storage">
+    How vectors are stored per-shard
+  </Card>
+  <Card title="Hybrid Scoring" icon="chart-mixed" href="/architecture/hybrid-scoring">
+    How shards execute hybrid queries
+  </Card>
+</CardGroup>

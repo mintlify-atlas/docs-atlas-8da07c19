@@ -1,0 +1,163 @@
+---
+title: Data Types
+description: Core data type definitions used in Turbo Query API
+---
+
+## SearchRequest
+
+Request payload for search queries.
+
+```go internal/shardnode/types.go
+type SearchRequest struct {
+	Query string `json:"query"`
+	TopK  int    `json:"top_k"`
+}
+```
+
+<ResponseField name="query" type="string" required>
+  The search query string to match against indexed documents.
+</ResponseField>
+
+<ResponseField name="top_k" type="int">
+  Maximum number of results to return. Defaults to 10 if not specified or &lt;= 0.
+</ResponseField>
+
+### Example
+
+<CodeGroup>
+
+```json Request
+{
+  "query": "machine learning algorithms",
+  "top_k": 10
+}
+```
+
+```go Go Struct
+req := SearchRequest{
+    Query: "machine learning algorithms",
+    TopK:  10,
+}
+```
+
+</CodeGroup>
+
+## SearchResponse
+
+Response containing search results.
+
+```go internal/shardnode/types.go
+type SearchResponse struct {
+	Hits []SearchHit `json:"hits"`
+}
+```
+
+<ResponseField name="hits" type="SearchHit[]">
+  Array of search results, sorted by relevance score in descending order.
+</ResponseField>
+
+### Example
+
+```json Response
+{
+  "hits": [
+    {
+      "doc_id": "12345",
+      "score": 0.92,
+      "shard_id": "0",
+      "title": "Introduction to Machine Learning",
+      "text": "Machine learning is a subset of artificial intelligence..."
+    }
+  ]
+}
+```
+
+## SearchHit
+
+Individual search result with metadata and relevance score.
+
+```go internal/shardnode/types.go
+type SearchHit struct {
+	DocID   string  `json:"doc_id"`
+	Score   float64 `json:"score"`
+	ShardID string  `json:"shard_id"`
+	Title   string  `json:"title"`
+	Text    string  `json:"text"`
+}
+```
+
+<ResponseField name="doc_id" type="string">
+  Unique identifier for the document.
+</ResponseField>
+
+<ResponseField name="score" type="float64">
+  Hybrid relevance score combining BM25 (70%) and cosine similarity (30%). Range: 0.0 to 1.0.
+  
+  The score is calculated as:
+  ```
+  final_score = 0.7 * normalized_bm25 + 0.3 * normalized_cosine
+  ```
+</ResponseField>
+
+<ResponseField name="shard_id" type="string">
+  ID of the shard containing this document.
+</ResponseField>
+
+<ResponseField name="title" type="string">
+  Document title extracted from the Bleve index.
+</ResponseField>
+
+<ResponseField name="text" type="string">
+  Document text content extracted from the Bleve index.
+</ResponseField>
+
+### Example
+
+<CodeGroup>
+
+```json JSON
+{
+  "doc_id": "12345",
+  "score": 0.92,
+  "shard_id": "0",
+  "title": "Introduction to Machine Learning",
+  "text": "Machine learning is a subset of artificial intelligence that focuses on developing algorithms..."
+}
+```
+
+```go Go Struct
+hit := SearchHit{
+    DocID:   "12345",
+    Score:   0.92,
+    ShardID: "0",
+    Title:   "Introduction to Machine Learning",
+    Text:    "Machine learning is a subset of artificial intelligence...",
+}
+```
+
+</CodeGroup>
+
+## Scoring Algorithm
+
+<Expandable title="Hybrid Search Scoring Details">
+
+Turbo Query uses a hybrid scoring approach that combines:
+
+1. **BM25 Score (70% weight)**: Traditional full-text search ranking from Bleve
+2. **Cosine Similarity (30% weight)**: Semantic similarity using 384-dimensional embeddings
+
+### Process (internal/shardnode/routes.go:53-141)
+
+1. Query is embedded using all-minilm model
+2. Top 100 candidates retrieved via BM25 (rerankWindow)
+3. Each candidate's vector is loaded from mmap
+4. Cosine similarity calculated via dot product (vectors are pre-normalized)
+5. Scores normalized and combined:
+   ```
+   normalized_cosine = (dot_product + 1) / 2
+   normalized_bm25 = bm25_score / max_bm25_score
+   final_score = 0.7 * normalized_bm25 + 0.3 * normalized_cosine
+   ```
+6. Results sorted by final score and limited to top_k
+
+</Expandable>

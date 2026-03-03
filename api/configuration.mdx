@@ -1,0 +1,233 @@
+---
+title: Configuration
+description: Environment variables, constants, and configuration options for Turbo Query
+---
+
+## Environment Variables
+
+Configure shard nodes using these environment variables.
+
+### PORT
+
+<ParamField path="PORT" type="string" default="8080">
+  HTTP server port for the shard node.
+  
+  ```bash
+  PORT=8080
+  ```
+  
+  Defined in: `internal/shardnode/server.go:32-35`
+</ParamField>
+
+### SHARD_ID
+
+<ParamField path="SHARD_ID" type="string" default="0">
+  Unique identifier for this shard instance.
+  
+  ```bash
+  SHARD_ID=0
+  ```
+  
+  Used for logging and tracking which shard processed each search result.
+  
+  Defined in: `internal/shardnode/server.go:39-42`
+</ParamField>
+
+## Data Paths
+
+Fixed paths where shard data is stored and accessed.
+
+<ParamField path="/data/index.bleve" type="path">
+  Bleve full-text search index directory.
+  
+  Contains inverted index for BM25 ranking and document field storage.
+  
+  Location: `internal/shardnode/server.go:46`
+</ParamField>
+
+<ParamField path="/data/vectors.bin" type="path">
+  Memory-mapped binary file containing document embeddings.
+  
+  Format: Sequential 384-dimensional float32 vectors (1536 bytes per document).
+  Accessed via mmap for zero-copy reads.
+  
+  Location: `internal/shardnode/server.go:47`
+</ParamField>
+
+<ParamField path="/data/docmap.json" type="path">
+  JSON mapping of global document IDs to local shard document IDs.
+  
+  Format: `{"global_id": "local_id"}`
+  
+  Location: `internal/shardnode/server.go:48`
+</ParamField>
+
+## Search Constants
+
+Core parameters controlling search behavior.
+
+### rerankWindow
+
+<ParamField path="rerankWindow" type="int" default="100">
+  Number of BM25 candidates to retrieve before vector reranking.
+  
+  ```go internal/shardnode/routes.go
+  const rerankWindow = 100 // BM25 candidates
+  ```
+  
+  Increasing this value improves recall but increases latency.
+  
+  Location: `internal/shardnode/routes.go:21`
+</ParamField>
+
+### vectorDim
+
+<ParamField path="vectorDim" type="int" default="384">
+  Dimensionality of document embeddings.
+  
+  ```go internal/shardnode/routes.go
+  const vectorDim = 384
+  ```
+  
+  Must match the output dimension of the all-minilm embedding model.
+  
+  Location: `internal/shardnode/routes.go:22`
+</ParamField>
+
+## Indexing Constants
+
+Parameters for building and managing shards.
+
+### maxDocsPerShard
+
+<ParamField path="maxDocsPerShard" type="int" default="70000">
+  Maximum documents per shard.
+  
+  ```go internal/shard/shard.go
+  const maxDocsPerShard = 70000
+  ```
+  
+  Controls memory usage and ensures efficient mmap operations.
+  
+  Location: `internal/shard/shard.go:54`
+</ParamField>
+
+### batchSize
+
+<ParamField path="batchSize" type="int" default="100">
+  Number of documents to batch before committing to Bleve index.
+  
+  ```go internal/shard/shard.go
+  const batchSize = 100
+  ```
+  
+  Higher values improve indexing throughput but increase memory usage.
+  
+  Location: `internal/shard/shard.go:191`
+</ParamField>
+
+## Server Timeouts
+
+HTTP server timeout configuration.
+
+<ParamField path="ReadTimeout" type="duration" default="10s">
+  Maximum duration for reading the entire request.
+  
+  ```go internal/shardnode/server.go
+  ReadTimeout:  10 * time.Second,
+  ```
+  
+  Location: `internal/shardnode/server.go:86`
+</ParamField>
+
+<ParamField path="WriteTimeout" type="duration" default="30s">
+  Maximum duration for writing the response.
+  
+  ```go internal/shardnode/server.go
+  WriteTimeout: 30 * time.Second,
+  ```
+  
+  Allows time for search execution and vector reranking.
+  
+  Location: `internal/shardnode/server.go:87`
+</ParamField>
+
+## Ollama Configuration
+
+Embedding service configuration for semantic search.
+
+### URL
+
+<ParamField path="ollamaURL" type="string" default="http://ollama:11434/api/embeddings">
+  Ollama API endpoint for generating embeddings.
+  
+  ```go internal/embed/embed.go
+  const ollamaURL = "http://ollama:11434/api/embeddings"
+  ```
+  
+  Location: `internal/embed/embed.go:19`
+</ParamField>
+
+### Model
+
+<ParamField path="modelName" type="string" default="all-minilm">
+  Ollama model used for text embeddings.
+  
+  ```go internal/embed/embed.go
+  const modelName = "all-minilm"
+  ```
+  
+  Produces 384-dimensional normalized vectors.
+  
+  Location: `internal/embed/embed.go:21`
+</ParamField>
+
+### Timeout
+
+<ParamField path="httpClient.Timeout" type="duration" default="60s">
+  HTTP client timeout for embedding requests.
+  
+  ```go internal/embed/embed.go
+  var httpClient = &http.Client{
+      Timeout: 60 * time.Second,
+  }
+  ```
+  
+  Location: `internal/embed/embed.go:15-17`
+</ParamField>
+
+<Expandable title="Embedding Process Details">
+
+### Normalization
+
+All vectors are L2-normalized before storage:
+
+```go internal/embed/embed.go:32-47
+norm = sqrt(sum(v^2 for v in vec))
+for i in range(len(vec)):
+    vec[i] = vec[i] / norm
+```
+
+This allows cosine similarity to be computed as a simple dot product:
+```
+cosine_sim(a, b) = dot(a, b)  // when both are normalized
+```
+
+### Request Format
+
+```json
+{
+  "model": "all-minilm",
+  "prompt": "text to embed"
+}
+```
+
+### Response Format
+
+```json
+{
+  "embedding": [0.123, -0.456, ...] // 384 float64 values
+}
+```
+
+</Expandable>

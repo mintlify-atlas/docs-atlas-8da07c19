@@ -1,0 +1,425 @@
+---
+title: 'Contributing Guide'
+description: 'Set up your development environment and contribute to Turbo Query'
+---
+
+Turbo Query is an open-source distributed hybrid search engine. We welcome contributions of all kinds, from bug fixes to new features.
+
+## Project Structure
+
+The codebase is organized into three main directories:
+
+```
+turbo-query/
+├── cmd/
+│   ├── api/            # Coordinator server (fan-out layer)
+│   └── shard/          # Per-shard search server
+├── internal/
+│   ├── embed/          # Embedding client + normalization
+│   ├── server/         # Coordinator HTTP handlers
+│   ├── shard/          # Offline indexing pipeline
+│   └── shardnode/      # Shard HTTP handlers and hybrid search
+└── data/               # Generated shard indexes and vector files
+```
+
+### Directory Details
+
+<AccordionGroup>
+  <Accordion title="cmd/ - Entry Points">
+    Contains the main packages for running services:
+    
+    - `cmd/api/main.go` - Coordinator server that will fan out queries (in progress)
+    - `cmd/shard/main.go` - Individual shard server for hybrid search
+  </Accordion>
+  
+  <Accordion title="internal/embed/ - Embeddings">
+    Handles text embedding generation via Ollama:
+    
+    - `Embed(text string)` - Generate MiniLM embeddings
+    - `normalize(vec []float32)` - L2-normalize vectors for cosine similarity
+    - Vector dimension: **384** (from `all-minilm` model)
+  </Accordion>
+  
+  <Accordion title="internal/shard/ - Indexing">
+    Offline indexing pipeline implementation:
+    
+    - `ingestWiki()` - Stream JSON documents
+    - `worker()` - Generate embeddings in parallel
+    - `router()` - Consistent hash distribution
+    - `shardWriter()` - Batch index to Bleve
+    - `initShardStorage()` - Create mmap vector files
+  </Accordion>
+  
+  <Accordion title="internal/shardnode/ - Query">
+    Per-shard search and hybrid ranking:
+    
+    - BM25 candidate retrieval via Bleve
+    - Vector similarity reranking
+    - Score normalization and fusion
+    - HTTP search endpoint
+  </Accordion>
+</AccordionGroup>
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="Go 1.25+" icon="golang">
+    Install from [go.dev](https://go.dev/dl/)
+  </Card>
+  <Card title="Docker" icon="docker">
+    Required for Ollama embeddings
+  </Card>
+  <Card title="Make" icon="hammer">
+    Build automation tool
+  </Card>
+  <Card title="Git" icon="git">
+    Version control
+  </Card>
+</CardGroup>
+
+## Dependencies
+
+The project uses the following key dependencies:
+
+```go
+require (
+    github.com/blevesearch/bleve/v2 v2.5.7
+    github.com/edsrzf/mmap-go v1.2.0
+    github.com/go-chi/chi/v5 v5.2.5
+    github.com/go-chi/cors v1.2.2
+    github.com/joho/godotenv v1.5.1
+)
+```
+
+From `go.mod:5-11`
+
+<AccordionGroup>
+  <Accordion title="Bleve">
+    Full-text search library providing BM25 retrieval and inverted indexing.
+  </Accordion>
+  <Accordion title="mmap-go">
+    Memory-mapped file access for zero-copy vector reads.
+  </Accordion>
+  <Accordion title="chi">
+    Lightweight HTTP router for API endpoints.
+  </Accordion>
+  <Accordion title="godotenv">
+    Environment variable management.
+  </Accordion>
+</AccordionGroup>
+
+## Getting Started
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/abhiram-karanth-core/turbo-query
+    cd turbo-query
+    ```
+  </Step>
+  
+  <Step title="Install dependencies">
+    ```bash
+    go mod download
+    ```
+  </Step>
+  
+  <Step title="Start Ollama (for embeddings)">
+    ```bash
+    docker-compose up -d ollama
+    ```
+    
+    Pull the MiniLM model:
+    ```bash
+    docker exec -it ollama ollama pull all-minilm
+    ```
+  </Step>
+  
+  <Step title="Build the project">
+    ```bash
+    make build
+    ```
+    
+    This compiles the API server to `main.exe`.
+  </Step>
+</Steps>
+
+## Available Make Commands
+
+The Makefile provides convenient build targets:
+
+```makefile
+# Build the application
+build:
+	@echo "Building..."
+	@go build -o main.exe cmd/api/main.go
+
+# Run the application
+run:
+	@go run cmd/api/main.go
+
+# Test the application
+test:
+	@echo "Testing..."
+	@go test ./... -v
+
+# Clean the binary
+clean:
+	@echo "Cleaning..."
+	@rm -f main
+```
+
+From `Makefile:6-24`
+
+### Common Commands
+
+<CodeGroup>
+  ```bash Build
+  make build
+  ```
+  
+  ```bash Run
+  make run
+  ```
+  
+  ```bash Test
+  make test
+  ```
+  
+  ```bash Clean
+  make clean
+  ```
+</CodeGroup>
+
+## Development Workflow
+
+### Live Reload with Air
+
+For rapid development, use [Air](https://github.com/air-verse/air) for live reloading:
+
+```bash
+make watch
+```
+
+Air configuration (`.air.toml:5-28`):
+
+```toml
+[build]
+  args_bin = []
+  bin = ".\\main.exe"
+  cmd = "make build"
+  delay = 1000
+  exclude_dir = ["assets", "tmp", "vendor", "testdata", "node_modules"]
+  exclude_file = []
+  exclude_regex = ["_test.go"]
+  exclude_unchanged = false
+  follow_symlink = false
+  full_bin = ""
+  include_dir = []
+  include_ext = ["go", "tpl", "tmpl", "html"]
+  include_file = []
+  kill_delay = "0s"
+  log = "build-errors.log"
+  poll = false
+  poll_interval = 0
+  post_cmd = []
+  pre_cmd = []
+  rerun = false
+  rerun_delay = 500
+  send_interrupt = false
+  stop_on_error = false
+```
+
+<Info>
+  Air automatically rebuilds and restarts the server when you modify `.go` files.
+</Info>
+
+### Running Tests
+
+```bash
+make test
+```
+
+This runs all tests in the project with verbose output:
+
+```bash
+go test ./... -v
+```
+
+## Code Organization
+
+### Adding New Features
+
+<Steps>
+  <Step title="Identify the layer">
+    Determine if your feature belongs in:
+    - `cmd/` - New service binary
+    - `internal/` - Internal package
+    - Update existing handlers
+  </Step>
+  
+  <Step title="Write tests first">
+    Create `*_test.go` files following Go conventions:
+    ```go
+    package mypackage
+    
+    import "testing"
+    
+    func TestMyFeature(t *testing.T) {
+        // Test implementation
+    }
+    ```
+  </Step>
+  
+  <Step title="Implement the feature">
+    Follow existing patterns in the codebase:
+    - Use meaningful variable names
+    - Add comments for complex logic
+    - Keep functions focused and small
+  </Step>
+  
+  <Step title="Run tests and build">
+    ```bash
+    make test
+    make build
+    ```
+  </Step>
+</Steps>
+
+### Code Style
+
+<Card title="Go Standards" icon="check">
+  Follow standard Go conventions:
+  - Use `gofmt` for formatting
+  - Run `go vet` for static analysis
+  - Keep functions under 50 lines when possible
+  - Use meaningful names over comments
+</Card>
+
+## Debugging
+
+### Common Issues
+
+<AccordionGroup>
+  <Accordion title="Embedding service not available">
+    **Error:** `embed http error: connection refused`
+    
+    **Solution:** Ensure Ollama is running:
+    ```bash
+    docker-compose up -d ollama
+    docker exec -it ollama ollama pull all-minilm
+    ```
+  </Accordion>
+  
+  <Accordion title="Bleve index corruption">
+    **Error:** `index error: ...`
+    
+    **Solution:** Delete and rebuild the index:
+    ```bash
+    rm -rf data/shard-*/index.bleve
+    # Re-run the indexing pipeline
+    ```
+  </Accordion>
+  
+  <Accordion title="Out of memory during indexing">
+    **Error:** `fatal error: out of memory`
+    
+    **Solution:** Reduce batch size in `internal/shard/shard.go`:
+    ```go
+    const batchSize = 50  // Reduced from 100
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Testing Your Changes
+
+<Steps>
+  <Step title="Run unit tests">
+    ```bash
+    make test
+    ```
+  </Step>
+  
+  <Step title="Build the binary">
+    ```bash
+    make build
+    ```
+  </Step>
+  
+  <Step title="Test manually">
+    Start a shard server:
+    ```bash
+    go run cmd/shard/main.go
+    ```
+    
+    Query the endpoint:
+    ```bash
+    curl -X POST http://localhost:8080/search \
+      -H "Content-Type: application/json" \
+      -d '{"query": "quantum physics", "limit": 10}'
+    ```
+  </Step>
+</Steps>
+
+## Submitting Changes
+
+<Steps>
+  <Step title="Create a feature branch">
+    ```bash
+    git checkout -b feature/your-feature-name
+    ```
+  </Step>
+  
+  <Step title="Make your changes">
+    Follow the code style and testing guidelines above.
+  </Step>
+  
+  <Step title="Commit with clear messages">
+    ```bash
+    git add .
+    git commit -m "feat: add distributed query coordinator"
+    ```
+    
+    Use conventional commit format:
+    - `feat:` New features
+    - `fix:` Bug fixes
+    - `docs:` Documentation
+    - `refactor:` Code refactoring
+    - `test:` Test additions
+  </Step>
+  
+  <Step title="Push and open a PR">
+    ```bash
+    git push origin feature/your-feature-name
+    ```
+    
+    Open a pull request on [GitHub](https://github.com/abhiram-karanth-core/turbo-query)
+  </Step>
+</Steps>
+
+## Resources
+
+<CardGroup cols={2}>
+  <Card title="GitHub Repository" icon="github" href="https://github.com/abhiram-karanth-core/turbo-query">
+    View source code and open issues
+  </Card>
+  <Card title="Indexing Pipeline" icon="gears" href="/development/indexing-pipeline">
+    Understand the offline indexing process
+  </Card>
+  <Card title="API Reference" icon="book" href="/api/search">
+    Explore the search API
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/architecture/overview">
+    Learn about system design
+  </Card>
+</CardGroup>
+
+## Getting Help
+
+<Card title="Questions?" icon="question">
+  - Open an issue on [GitHub](https://github.com/abhiram-karanth-core/turbo-query/issues)
+  - Check existing documentation
+  - Review the source code comments
+</Card>
+
+We appreciate all contributions and look forward to your pull requests!

@@ -1,97 +1,124 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: Introduction
+description: Turbo Query is a high-performance distributed search engine combining BM25 keyword retrieval with semantic vector search using MiniLM embeddings
 ---
 
-## Setting up
+# Welcome to Turbo Query
 
-Get your documentation site up and running in minutes.
+Turbo Query is a high-performance distributed search system that combines BM25 keyword retrieval with semantic vector search using MiniLM embeddings. Built with production-grade infrastructure concepts, it demonstrates advanced search engine architecture including sharding, fan-out querying, and memory-mapped vector storage.
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get up and running with Turbo Query in minutes using Docker Compose
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Installation" icon="download" href="/installation">
+    Detailed installation and setup instructions for all environments
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Architecture" icon="sitemap" href="/architecture/overview">
+    Learn about the distributed architecture and hybrid search design
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api/search">
+    Complete API documentation for search endpoints and responses
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What is Turbo Query?
 
-Everything you need to create world-class documentation.
+Turbo Query is a distributed hybrid search engine that combines the best of both worlds:
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+- **Keyword Search (BM25)**: Fast, precise full-text retrieval using inverted indexes
+- **Semantic Search (Vector)**: Context-aware similarity matching using MiniLM embeddings
+- **Hybrid Ranking**: Intelligent fusion of both approaches for superior relevance
 
-## Need inspiration?
+The system uses consistent hash-based sharding to distribute documents across multiple shard servers, each maintaining its own Bleve inverted index and memory-mapped vector store for efficient zero-copy reads.
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Hybrid Search" icon="magnifying-glass">
+    Combines BM25 keyword retrieval with semantic vector reranking for optimal results
+  </Card>
+  <Card title="MiniLM Embeddings" icon="brain">
+    Uses all-MiniLM-L6-v2 via Ollama for high-quality 384-dimensional embeddings
+  </Card>
+  <Card title="Memory-Mapped Storage" icon="database">
+    Zero-copy vector reads using mmap for minimal latency
+  </Card>
+  <Card title="Distributed Sharding" icon="server">
+    Consistent hash-based document distribution across parallel shard servers
+  </Card>
+  <Card title="Containerized" icon="docker">
+    Fully containerized with Docker Compose for easy deployment
+  </Card>
+  <Card title="Production Ready" icon="gauge-high">
+    Per-shard latency instrumentation and robust error handling
+  </Card>
+</CardGroup>
+
+## How It Works
+
+Each search query flows through the following pipeline:
+
+1. **Query Embedding**: The search query is converted into a 384-dimensional vector using MiniLM
+2. **BM25 Retrieval**: Each shard retrieves top keyword matches using Bleve full-text search
+3. **Vector Reranking**: Candidates are rescored using cosine similarity with the query embedding
+4. **Hybrid Fusion**: Final scores combine normalized BM25 and semantic scores (70% BM25 + 30% semantic)
+5. **Top-K Results**: The highest-scoring documents are returned with full metadata
+
+<Info>
+Typical per-shard latency is **10-15ms** for local queries, with embedding generation being the primary cost factor.
+</Info>
+
+## Scoring Strategy
+
+Turbo Query uses a weighted hybrid scoring formula:
+
+```
+final_score = 0.7 × normalized_BM25 + 0.3 × normalized_cosine
+```
+
+This balances:
+- **Precision** from exact keyword matching (BM25)
+- **Recall** from semantic understanding (vector similarity)
+
+## Architecture Overview
+
+```
+User Query
+    ↓
+Coordinator (fan-out)
+    ↓
+Shard Servers (parallel)
+    ↓
+BM25 retrieve → Vector rerank → Hybrid score
+    ↓
+Top-K merge → Response
+```
+
+Each shard maintains:
+- A **Bleve** inverted index for keyword retrieval (source/internal/shardnode/server.go:50)
+- A **memory-mapped** dense vector store at `/data/vectors.bin` (source/internal/shardnode/server.go:47)
+- A shard-local document ID mapping in `/data/docmap.json` (source/internal/shardnode/server.go:48)
+- An HTTP search endpoint on port 8080 (source/docker-compose.yml:6)
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Language | Go 1.25+ |
+| HTTP Router | chi v5 |
+| Full-text Search | Bleve v2 |
+| Embeddings | all-MiniLM-L6-v2 via Ollama |
+| Containerization | Docker & Docker Compose |
+| Vector Storage | mmap-backed binary file |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Get Started" icon="play" href="/quickstart">
+    Follow the quickstart guide to run your first search query
+  </Card>
+  <Card title="Learn the Architecture" icon="book" href="/architecture/overview">
+    Deep dive into the distributed architecture and design decisions
+  </Card>
+</CardGroup>
