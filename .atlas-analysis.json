@@ -1,0 +1,86 @@
+{
+  "projectType": "data-platform",
+  "projectName": "Turbo Query",
+  "projectDescription": "High-performance distributed search engine combining BM25 keyword retrieval with semantic vector search",
+  "theme": "aspen",
+  "primaryColor": "#2563eb",
+  "lightColor": "#3b82f6",
+  "darkColor": "#1e40af",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/sharding",
+              "architecture/vector-storage",
+              "architecture/hybrid-scoring"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/deployment",
+              "operations/performance",
+              "operations/monitoring"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/indexing-pipeline",
+              "development/contributing"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api/search",
+              "api/health"
+            ]
+          },
+          {
+            "group": "Data Types",
+            "pages": [
+              "api/types",
+              "api/configuration"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Hybrid search combining BM25 keyword retrieval with semantic vector search",
+    "MiniLM embeddings via Ollama for semantic understanding",
+    "Consistent hash-based sharding for horizontal scalability",
+    "Memory-mapped vector storage for zero-copy reads",
+    "Per-shard HTTP servers with latency instrumentation",
+    "Fully containerized deployment with Docker Compose"
+  ],
+  "publicApiSurface": [
+    "POST /search - Execute hybrid search queries with BM25 and vector similarity",
+    "GET /health - Health check endpoint for monitoring",
+    "SearchRequest - Query parameters (query: string, top_k: int)",
+    "SearchResponse - Search results with hits array",
+    "SearchHit - Individual result (doc_id, score, shard_id, title, text)",
+    "Shard servers - Distributed search nodes on ports 9001-9004",
+    "Embedding API - MiniLM vector generation via Ollama"
+  ]
+}
